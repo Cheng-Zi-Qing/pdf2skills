@@ -426,6 +426,15 @@ Examples:
         action="store_true",
         help="Resume from existing progress"
     )
+    parser.add_argument(
+        "--llm-cache",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="DIR",
+        help="Cache LLM/embedding responses on disk so re-runs skip identical calls "
+             "(default dir: <output_dir>/.llm_cache; also settable via LLM_CACHE_DIR)"
+    )
 
     args = parser.parse_args()
 
@@ -449,6 +458,15 @@ Examples:
         print(f"Error: PDF file not found: {pdf_path}")
         sys.exit(1)
 
+    if args.llm_cache:
+        if args.llm_cache == "auto":
+            base = output_dir or pdf_path.parent / f"{pdf_path.stem}_output"
+            cache_dir = Path(base) / ".llm_cache"
+        else:
+            cache_dir = Path(args.llm_cache)
+        os.environ["LLM_CACHE_DIR"] = str(cache_dir)
+        print(f"LLM response cache: {cache_dir}")
+
     try:
         run_pipeline(
             pdf_path=pdf_path,
@@ -464,6 +482,13 @@ Examples:
         print(f"\nError: {e}")
         print("\nIf this is a rate limit error, wait a few minutes and run with --resume")
         raise
+    finally:
+        try:
+            from llm_client import print_usage_summary
+            print_header("LLM Usage", "-")
+            print_usage_summary()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

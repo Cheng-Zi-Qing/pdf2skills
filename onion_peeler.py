@@ -13,12 +13,16 @@ anchor tokens that mark where splits should occur.
 import os
 import re
 import json
-import requests
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
 from Levenshtein import distance as levenshtein_distance
+
+try:
+    from .llm_client import LLMClient, LLMError
+except ImportError:
+    from llm_client import LLMClient, LLMError
 from pathlib import Path
 
 # Load .env from pdf2skills directory
@@ -74,33 +78,6 @@ class ChunkNode:
         }
 
 
-class DeepSeekClient:
-    """Client for DeepSeek API via SiliconFlow."""
-
-    def __init__(self, model: str = "deepseek-ai/DeepSeek-V3.2"):
-        self.model = model
-        self.api_key = SILICONFLOW_API_KEY
-        self.base_url = SILICONFLOW_BASE_URL
-
-    def chat(self, messages: list[dict], max_tokens: int = 2000, temperature: float = 0.3) -> str:
-        """Send chat completion request."""
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature
-            }
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-
-
 class OnionPeeler:
     """
     Recursive markdown chunking agent.
@@ -113,7 +90,7 @@ class OnionPeeler:
         self.markdown_path = Path(markdown_path)
         self.content = self.markdown_path.read_text(encoding="utf-8")
         self.lines = self.content.split("\n")
-        self.llm = DeepSeekClient()
+        self.llm = LLMClient(role="chunking")
         self.headers: list[Header] = []
         self.chunk_counter = 0
 
@@ -200,23 +177,17 @@ IMPORTANT: Your "reasoning" field MUST be written in {OUTPUT_LANGUAGE}.
 Return ONLY the JSON object, no other text."""
 
         print("Phase 1: Analyzing document structure for chapter split...")
-        response = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=1000)
-
-        # Parse response
         try:
-            # Extract JSON from response
-            json_match = re.search(r'\{[^{}]*"split_points"[^{}]*\}', response, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = json.loads(response)
+            result = self.llm.chat_json(
+                [{"role": "user", "content": prompt}], expect=dict, max_tokens=1000
+            )
 
             split_points = [1] + sorted(result.get("split_points", []))
             print(f"  Split points: {split_points}")
             if "reasoning" in result:
                 print(f"  Reasoning: {result['reasoning']}")
-        except json.JSONDecodeError:
-            print(f"  Warning: Could not parse LLM response, using default splits")
+        except (ValueError, LLMError) as e:
+            print(f"  Warning: Could not get split points from LLM ({e}), using default splits")
             # Fallback: split at major chapter boundaries
             split_points = [1]
             for h in self.headers:
@@ -341,19 +312,14 @@ IMPORTANT: Your "description" fields MUST be written in {OUTPUT_LANGUAGE}.
 Return ONLY the JSON object."""
 
         try:
-            response = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=1500)
-
-            # Parse anchors
-            json_match = re.search(r'\{[^{}]*"anchors"[^{}]*\[.*?\][^{}]*\}', response, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = json.loads(response)
+            result = self.llm.chat_json(
+                [{"role": "user", "content": prompt}], expect=dict, max_tokens=1500
+            )
 
             anchors = result.get("anchors", [])
 
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"    Warning: Could not parse LLM response: {e}")
+        except (ValueError, LLMError) as e:
+            print(f"    Warning: Could not get anchors from LLM: {e}")
             return [chunk]
 
         if not anchors:

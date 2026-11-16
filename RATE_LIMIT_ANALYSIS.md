@@ -1,6 +1,8 @@
 # Rate Limiting and Concurrency Analysis
 
-## Current State: **NO RATE LIMITING IMPLEMENTED**
+> **Superseded (2026-11):** rate limiting, retries and backoff now live in `llm_client.py`. This document describes the original state.
+
+## Original State: **NO RATE LIMITING IMPLEMENTED**
 
 ### Summary
 The system currently has **ZERO rate limiting or concurrency controls** for API calls. All requests are made sequentially without delays, which leads to immediate rate limit violations.

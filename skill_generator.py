@@ -23,11 +23,15 @@ import os
 import json
 import time
 import re
-import requests
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
+
+try:
+    from .llm_client import LLMClient, extract_json
+except ImportError:
+    from llm_client import LLMClient, extract_json
 from pathlib import Path
 
 # Load .env from pdf2skills directory
@@ -55,62 +59,11 @@ MAX_SKUS_PER_LLM_CALL = 15  # Limit to avoid context overflow
 # GLM-4.7 Client (reuse from sku_extractor pattern)
 # ============================================================================
 
-class GLM4Client:
-    """
-    Client for GLM-4.7 API via SiliconFlow.
-    
-    BigModel is commented out - using SiliconFlow as sole provider.
-    """
+class GLM4Client(LLMClient):
+    """Backward-compatible name; now a thin wrapper over the shared LLMClient."""
 
     def __init__(self, api_key: str = None, base_url: str = None, rate_limit: float = None):
-        # BigModel configuration (commented out)
-        # self.api_key = api_key or GLM_API_KEY
-        # self.base_url = base_url or GLM_BASE_URL
-        # self.model = "glm-4.7"
-        
-        # SiliconFlow configuration (sole provider)
-        self.siliconflow_api_key = SILICONFLOW_API_KEY
-        self.siliconflow_base_url = SILICONFLOW_BASE_URL
-        self.siliconflow_model = "Pro/zai-org/GLM-4.7"
-        
-        self.rate_limit = rate_limit or GLM_RATE_LIMIT_SECONDS
-        self.last_call_time = 0
-
-        if not self.siliconflow_api_key:
-            raise ValueError("SILICONFLOW_API_KEY must be set in environment")
-
-    def _wait_for_rate_limit(self):
-        elapsed = time.time() - self.last_call_time
-        if elapsed < self.rate_limit:
-            time.sleep(self.rate_limit - elapsed)
-        self.last_call_time = time.time()
-
-    def chat(self, messages: list, temperature: float = 0.3, max_tokens: int = 16000) -> str:
-        """Send chat completion request via SiliconFlow."""
-        self._wait_for_rate_limit()
-
-        headers = {
-            "Authorization": f"Bearer {self.siliconflow_api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": self.siliconflow_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-
-        response = requests.post(
-            f"{self.siliconflow_base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=180
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
+        super().__init__(role="skill", api_key=api_key, base_url=base_url, rate_limit=rate_limit)
 
 
 # ============================================================================
@@ -370,21 +323,17 @@ class SkillGenerator:
 
     def _parse_skills_response(self, response: str) -> List[GeneratedSkill]:
         """Parse LLM response into GeneratedSkill objects."""
-        # Extract JSON from response
-        json_match = re.search(r'\[[\s\S]*\]', response)
-        if not json_match:
-            print(f"  [WARN] Could not find JSON array in response")
-            return []
-
         try:
-            skills_data = json.loads(json_match.group())
-        except json.JSONDecodeError as e:
+            skills_data = extract_json(response, expect=list)
+        except ValueError as e:
             print(f"  [WARN] Failed to parse JSON: {e}")
             print(f"  Response preview: {response[:500]}")
             return []
 
         skills = []
         for skill_data in skills_data:
+            if not isinstance(skill_data, dict):
+                continue
             skill = GeneratedSkill(
                 skill_name=skill_data.get("skill_name", "unnamed-skill"),
                 source_sku_uuids=skill_data.get("source_sku_uuids", []),

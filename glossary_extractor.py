@@ -16,13 +16,17 @@ Output: glossary.json with structured terminology
 import os
 import json
 import time
-import requests
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Optional, Any
 from collections import defaultdict
 from dotenv import load_dotenv
+
+try:
+    from .llm_client import LLMClient, extract_json
+except ImportError:
+    from llm_client import LLMClient, extract_json
 
 
 # Load environment
@@ -80,51 +84,11 @@ class GlossaryVariable:
 # GLM Client (for optional LLM-assisted extraction)
 # ============================================================================
 
-class GLM4Client:
-    """Client for GLM-4.7 API via SiliconFlow."""
+class GLM4Client(LLMClient):
+    """Backward-compatible name; now a thin wrapper over the shared LLMClient."""
 
-    def __init__(self, rate_limit: float = None):
-        self.api_key = SILICONFLOW_API_KEY
-        self.base_url = SILICONFLOW_BASE_URL
-        self.model = "Pro/zai-org/GLM-4.7"
-        self.rate_limit = rate_limit or GLM_RATE_LIMIT_SECONDS
-        self.last_call_time = 0
-
-    def _wait_for_rate_limit(self):
-        elapsed = time.time() - self.last_call_time
-        if elapsed < self.rate_limit:
-            time.sleep(self.rate_limit - elapsed)
-        self.last_call_time = time.time()
-
-    def chat(self, messages: list, temperature: float = 0.3, max_tokens: int = 2000) -> str:
-        """Send chat completion request."""
-        if not self.api_key:
-            raise ValueError("SILICONFLOW_API_KEY not set")
-
-        self._wait_for_rate_limit()
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
+    def __init__(self, api_key: str = None, base_url: str = None, rate_limit: float = None):
+        super().__init__(role="glossary", api_key=api_key, base_url=base_url, rate_limit=rate_limit)
 
 
 # ============================================================================
@@ -350,10 +314,11 @@ class GlossaryExtractor:
             response = self.llm_client.chat([{"role": "user", "content": prompt}])
 
             # Parse response
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                result = json.loads(json_match.group())
+            try:
+                result = extract_json(response, expect=dict)
+            except ValueError:
+                result = None
+            if result:
                 for term_data in result.get("terms", []):
                     term = term_data.get("term", "")
                     if term:
