@@ -15,12 +15,16 @@ import json
 import time
 import math
 import uuid
-import requests
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 from collections import defaultdict
 from dotenv import load_dotenv
+
+try:
+    from .llm_client import LLMClient, EmbeddingClient as _SharedEmbeddingClient, extract_json
+except ImportError:
+    from llm_client import LLMClient, EmbeddingClient as _SharedEmbeddingClient, extract_json
 from pathlib import Path
 
 # Load .env from pdf2skills directory
@@ -45,50 +49,11 @@ FUSION_RATE_LIMIT_SECONDS = float(os.getenv("FUSION_RATE_LIMIT_SECONDS", "2.0"))
 # DeepSeek V3.2 Client
 # ============================================================================
 
-class DeepSeekClient:
-    """Client for DeepSeek V3.2 via SiliconFlow API."""
+class DeepSeekClient(LLMClient):
+    """Backward-compatible name; now a thin wrapper over the shared LLMClient."""
 
     def __init__(self, api_key: str = None, base_url: str = None, rate_limit: float = None):
-        self.api_key = api_key or SILICONFLOW_API_KEY
-        self.base_url = base_url or SILICONFLOW_BASE_URL
-        self.model = "deepseek-ai/DeepSeek-V3"
-        self.rate_limit = rate_limit if rate_limit is not None else FUSION_RATE_LIMIT_SECONDS
-        self._last_call_time = 0
-
-        if not self.api_key:
-            raise ValueError("SILICONFLOW_API_KEY not set in environment")
-
-    def _apply_rate_limit(self):
-        """Apply rate limiting between API calls."""
-        if self.rate_limit > 0:
-            elapsed = time.time() - self._last_call_time
-            if elapsed < self.rate_limit:
-                sleep_time = self.rate_limit - elapsed
-                print(f"  [RATE LIMIT] Waiting {sleep_time:.1f}s...")
-                time.sleep(sleep_time)
-        self._last_call_time = time.time()
-
-    def chat(self, messages: list, max_tokens: int = 4000, temperature: float = 0.3) -> str:
-        """Send chat completion request to DeepSeek V3.2."""
-        self._apply_rate_limit()
-
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
+        super().__init__(role="fusion", api_key=api_key, base_url=base_url, rate_limit=rate_limit)
 
 
 # ============================================================================
@@ -251,8 +216,7 @@ class TagNormalizer:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = self.llm.chat(messages, max_tokens=4000, temperature=0.1)
-            self.objects_mapping = self._parse_json_response(response)
+            self.objects_mapping = self.llm.chat_json(messages, max_tokens=4000, temperature=0.1, expect=dict)
 
             # Count merges
             canonical_count = len(set(self.objects_mapping.values()))
@@ -284,8 +248,7 @@ class TagNormalizer:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = self.llm.chat(messages, max_tokens=4000, temperature=0.1)
-            self.tags_mapping = self._parse_json_response(response)
+            self.tags_mapping = self.llm.chat_json(messages, max_tokens=4000, temperature=0.1, expect=dict)
 
             # Count merges
             canonical_count = len(set(self.tags_mapping.values()))
@@ -298,19 +261,8 @@ class TagNormalizer:
             self.tags_mapping = {tag: tag for tag in self.all_tags}
 
     def _parse_json_response(self, response: str) -> dict:
-        """Parse JSON response from LLM."""
-        response = response.strip()
-
-        # Handle markdown code blocks
-        if response.startswith("```"):
-            lines = response.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines[-1].strip() == "```":
-                lines = lines[:-1]
-            response = "\n".join(lines)
-
-        return json.loads(response)
+        """Parse JSON response from LLM (fences, <think>, surrounding prose tolerated)."""
+        return extract_json(response, expect=dict)
 
     def apply_mappings(self):
         """Apply normalization mappings to all SKU files."""
@@ -647,62 +599,11 @@ class SKUBucketer:
 # Embedding Client (BGE-M3)
 # ============================================================================
 
-class EmbeddingClient:
-    """Client for BGE-M3 embeddings via SiliconFlow API."""
+class EmbeddingClient(_SharedEmbeddingClient):
+    """Backward-compatible name; batching, retries and caching live in llm_client."""
 
     def __init__(self, api_key: str = None, base_url: str = None, rate_limit: float = None):
-        self.api_key = api_key or SILICONFLOW_API_KEY
-        self.base_url = base_url or SILICONFLOW_BASE_URL
-        self.model = "Pro/BAAI/bge-m3"
-        self.rate_limit = rate_limit if rate_limit is not None else FUSION_RATE_LIMIT_SECONDS
-        self._last_call_time = 0
-
-        if not self.api_key:
-            raise ValueError("SILICONFLOW_API_KEY not set in environment")
-
-    def _apply_rate_limit(self):
-        """Apply rate limiting between API calls."""
-        if self.rate_limit > 0:
-            elapsed = time.time() - self._last_call_time
-            if elapsed < self.rate_limit:
-                sleep_time = self.rate_limit - elapsed
-                time.sleep(sleep_time)
-        self._last_call_time = time.time()
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """
-        Get embeddings for a list of texts.
-
-        Args:
-            texts: List of texts to embed
-
-        Returns:
-            List of embedding vectors
-        """
-        self._apply_rate_limit()
-
-        url = f"{self.base_url}/embeddings"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.model,
-            "input": texts,
-            "encoding_format": "float"
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-
-        result = response.json()
-        # Sort by index to ensure correct order
-        embeddings = sorted(result["data"], key=lambda x: x["index"])
-        return [e["embedding"] for e in embeddings]
-
-    def embed_single(self, text: str) -> list[float]:
-        """Get embedding for a single text."""
-        return self.embed([text])[0]
+        super().__init__(role="embedding", api_key=api_key, base_url=base_url, rate_limit=rate_limit)
 
 
 def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
@@ -1750,10 +1651,10 @@ class SKUResolver:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = self.llm.chat(messages, max_tokens=4000, temperature=0.2)
-            merged_sku = self._parse_json_response(response)
+            merged_sku = self.llm.chat_json(messages, max_tokens=4000, temperature=0.2, expect=dict)
 
             # Add merge metadata
+            merged_sku.setdefault("metadata", {})
             merged_sku["metadata"]["uuid"] = str(uuid.uuid4()) if "uuid" not in merged_sku.get("metadata", {}) else merged_sku["metadata"]["uuid"]
             merged_sku["metadata"]["source_ref"] = {
                 "merged_from": [uuid1, uuid2],
@@ -1789,10 +1690,10 @@ class SKUResolver:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = self.llm.chat(messages, max_tokens=4000, temperature=0.2)
-            resolved_sku = self._parse_json_response(response)
+            resolved_sku = self.llm.chat_json(messages, max_tokens=4000, temperature=0.2, expect=dict)
 
             # Add resolution metadata
+            resolved_sku.setdefault("metadata", {})
             resolved_sku["metadata"]["uuid"] = str(uuid.uuid4()) if "uuid" not in resolved_sku.get("metadata", {}) else resolved_sku["metadata"]["uuid"]
             resolved_sku["metadata"]["source_ref"] = {
                 "resolved_from": [uuid1, uuid2],
@@ -1806,18 +1707,8 @@ class SKUResolver:
             return None
 
     def _parse_json_response(self, response: str) -> dict:
-        """Parse JSON response from LLM."""
-        response = response.strip()
-
-        if response.startswith("```"):
-            lines = response.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines[-1].strip() == "```":
-                lines = lines[:-1]
-            response = "\n".join(lines)
-
-        return json.loads(response)
+        """Parse JSON response from LLM (fences, <think>, surrounding prose tolerated)."""
+        return extract_json(response, expect=dict)
 
     def resolve_all(self, verbose: bool = True) -> list[dict]:
         """

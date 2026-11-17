@@ -793,10 +793,38 @@ python run_pipeline.py book.pdf  # Router generated as Stage 7
 
 ---
 
+### Session 7: 2026-11-15 - Unified LLM Layer
+
+**Status:** COMPLETED
+
+**Accomplished:**
+1. Added `llm_client.py`, which replaces 7 copy-pasted API clients (`GLM4Client` ×4, `DeepSeekClient` ×2, `DeepSeekR1Client`, `EmbeddingClient`)
+   - Role-based models (`chunking`, `density`, `extraction`, `fusion`, `skill`, `router`, `glossary`, `embedding`), overridable via `MODEL_<ROLE>` etc.
+   - Any OpenAI-compatible provider via `LLM_BASE_URL` / `LLM_API_KEY` (SiliconFlow vars still honoured)
+   - Retries with exponential backoff + jitter on 429/5xx/timeouts/malformed bodies; respects `Retry-After`
+   - `extract_json()` handles fences, `<think>`, surrounding prose, nested objects and trailing commas; `chat_json()` adds one "fix your JSON" follow-up
+   - Thread-safe rate limiter shared per model (ready for concurrent stages)
+   - Optional disk cache (`--llm-cache` / `LLM_CACHE_DIR`) and an end-of-run usage summary
+2. Migrated all stages. The old class names remain as thin subclasses, so external imports keep working
+3. Bug fixes found along the way:
+   - onion_peeler: the `[^{}]*` regex failed on nested JSON; a network error in phase 1 crashed the run (the call was outside the try)
+   - semantic_density: the "any number" fallback could pick up an arbitrary number as the score; R1 `max_tokens` raised 500 → 2000 because reasoning consumed the budget
+   - knowledge_fusion: a KeyError when the merged/branched SKU lacked `metadata`
+   - sku_extractor / skill_generator: non-dict items in the returned arrays crashed parsing
+4. Added `tests/test_llm_client.py`: 28 offline tests with faked HTTP
+
+**Next candidates:**
+- Concurrency for SKU extraction / skill generation (the limiter is already thread-safe)
+- Migrate `skills2app/chatbot/spec_drafter.py` to `llm_client`
+- Router context-length issue (see Session 6)
+
+---
+
 ## Version History
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2 | 2026-11-15 | Unified LLM client (retries, JSON repair, cache, configurable models) |
 | 1.1 | 2025-01-27 | Added Stage 7 - Router Generator |
 | 1.0 | 2025-01-22 | Initial release - Full pipeline with SiliconFlow |
 

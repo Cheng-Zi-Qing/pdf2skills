@@ -9,11 +9,15 @@ import os
 import json
 import uuid
 import time
-import requests
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from dotenv import load_dotenv
+
+try:
+    from .llm_client import LLMClient, LLMError
+except ImportError:
+    from llm_client import LLMClient, LLMError
 from pathlib import Path
 
 # Load .env from pdf2skills directory
@@ -109,118 +113,11 @@ class SKU:
 # GLM-4.7 Client
 # ============================================================================
 
-class GLM4Client:
-    """
-    Client for GLM-4.7 API via SiliconFlow.
-
-    BigModel is disabled - using SiliconFlow as sole provider.
-    Implements rate limiting to avoid API throttling.
-    """
+class GLM4Client(LLMClient):
+    """Backward-compatible name; now a thin wrapper over the shared LLMClient."""
 
     def __init__(self, api_key: str = None, base_url: str = None, rate_limit: float = None):
-        self.api_key = api_key or GLM_API_KEY
-        self.base_url = base_url or GLM_BASE_URL
-
-        # SiliconFlow fallback configuration
-        self.siliconflow_api_key = SILICONFLOW_API_KEY
-        self.siliconflow_base_url = SILICONFLOW_BASE_URL
-        self.siliconflow_model = "Pro/zai-org/GLM-4.7"
-
-        # Rate limiting
-        self.rate_limit = rate_limit if rate_limit is not None else GLM_RATE_LIMIT_SECONDS
-        self._last_call_time = 0
-
-        # Require SiliconFlow API key (BigModel commented out)
-        if not self.siliconflow_api_key:
-            raise ValueError("SILICONFLOW_API_KEY must be set in environment")
-
-    def _apply_rate_limit(self):
-        """Apply rate limiting between API calls."""
-        if self.rate_limit > 0:
-            elapsed = time.time() - self._last_call_time
-            if elapsed < self.rate_limit:
-                sleep_time = self.rate_limit - elapsed
-                print(f"  [RATE LIMIT] Waiting {sleep_time:.1f}s before next API call...")
-                time.sleep(sleep_time)
-        self._last_call_time = time.time()
-
-    def _try_bigmodel(self, messages: list, max_tokens: int, temperature: float) -> str:
-        """Try BigModel API."""
-        if not self.api_key:
-            raise ValueError("GLM_API_KEY not set")
-        
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "glm-4.7",
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-
-    def _try_siliconflow(self, messages: list, max_tokens: int, temperature: float) -> str:
-        """Try SiliconFlow API as fallback."""
-        if not self.siliconflow_api_key:
-            raise ValueError("SILICONFLOW_API_KEY not set")
-        
-        url = f"{self.siliconflow_base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.siliconflow_api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.siliconflow_model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-
-    def chat(self, messages: list, max_tokens: int = 8000, temperature: float = 0.3) -> str:
-        """
-        Send chat completion request to GLM-4.7 via SiliconFlow.
-        
-        Applies rate limiting to avoid API throttling.
-        """
-        # Apply rate limiting before making request
-        self._apply_rate_limit()
-
-        # Use SiliconFlow only (BigModel commented out for now)
-        # # Try BigModel first if API key is available
-        # if self.api_key:
-        #     try:
-        #         return self._try_bigmodel(messages, max_tokens, temperature)
-        #     except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-        #         # If BigModel fails and SiliconFlow is available, try fallback
-        #         if self.siliconflow_api_key:
-        #             print(f"  [INFO] BigModel request failed, trying SiliconFlow fallback: {type(e).__name__}")
-        #             try:
-        #                 return self._try_siliconflow(messages, max_tokens, temperature)
-        #             except Exception as fallback_error:
-        #                 raise Exception(f"Both BigModel and SiliconFlow failed. BigModel: {e}, SiliconFlow: {fallback_error}")
-        #         else:
-        #             # No fallback available, raise original error
-        #             raise
-        
-        # Use SiliconFlow directly
-        if self.siliconflow_api_key:
-            return self._try_siliconflow(messages, max_tokens, temperature)
-        
-        raise ValueError("SILICONFLOW_API_KEY must be set in environment")
+        super().__init__(role="extraction", api_key=api_key, base_url=base_url, rate_limit=rate_limit)
 
 
 # ============================================================================
@@ -419,25 +316,13 @@ class SKUExtractor:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = self.llm.chat(messages, max_tokens=8000, temperature=0.3)
-
-            # Parse JSON response
-            # Handle potential markdown code blocks
-            response = response.strip()
-            if response.startswith("```"):
-                # Remove markdown code block
-                lines = response.split("\n")
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                response = "\n".join(lines)
-
-            sku_list = json.loads(response)
+            sku_list = self.llm.chat_json(messages, expect=list, max_tokens=8000, temperature=0.3)
 
             # Convert to SKU objects and save immediately if output_dir is set
             skus = []
             for i, sku_data in enumerate(sku_list):
+                if not isinstance(sku_data, dict):
+                    continue
                 sku = self._parse_sku(sku_data, chunk_info, i)
                 skus.append(sku)
                 
@@ -447,10 +332,9 @@ class SKUExtractor:
 
             return skus
 
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             if verbose:
                 print(f"  [WARN] Failed to parse JSON for {chunk_id}: {e}")
-                print(f"  Response preview: {response[:200]}...")
             return []
         except Exception as e:
             if verbose:

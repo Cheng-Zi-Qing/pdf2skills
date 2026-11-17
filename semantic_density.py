@@ -17,13 +17,17 @@ import os
 import re
 import json
 import random
-import requests
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
 from sklearn.linear_model import LinearRegression
+
+try:
+    from .llm_client import LLMClient, extract_json
+except ImportError:
+    from llm_client import LLMClient, extract_json
 from pathlib import Path
 
 # Load .env from pdf2skills directory
@@ -296,9 +300,8 @@ class DeepSeekR1Client:
     """Client for DeepSeek R1 reasoning model via SiliconFlow."""
 
     def __init__(self):
-        self.model = "deepseek-ai/DeepSeek-R1"
-        self.api_key = SILICONFLOW_API_KEY
-        self.base_url = SILICONFLOW_BASE_URL
+        self.client = LLMClient(role="density")
+        self.model = self.client.model
 
     def score_chunk(self, chunk_content: str, chunk_title: str, parent_path: list[str]) -> int:
         """
@@ -340,34 +343,25 @@ Return ONLY a JSON object:
 Return ONLY the JSON object."""
 
         try:
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 500,
-                    "temperature": 0.3
-                },
-                timeout=60
+            # Reasoning models spend part of max_tokens on <think>; 500 was often too small.
+            content = self.client.chat(
+                [{"role": "user", "content": prompt}], max_tokens=2000, temperature=0.3
             )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
 
-            # Parse score from response
-            json_match = re.search(r'\{[^{}]*"score"\s*:\s*(\d+)[^{}]*\}', content)
-            if json_match:
-                return int(json_match.group(1))
+            try:
+                result = extract_json(content, expect=dict)
+                if "score" in result:
+                    return max(0, min(100, int(float(result["score"]))))
+            except (ValueError, TypeError):
+                pass
 
-            # Fallback: try to find any number
-            num_match = re.search(r'\b(\d{1,3})\b', content)
-            if num_match:
-                return min(100, int(num_match.group(1)))
+            # Fallback: a "score": N pattern anywhere in the reply
+            score_match = re.search(r'"?score"?\s*[:=]\s*(\d{1,3})', content)
+            if score_match:
+                return min(100, int(score_match.group(1)))
 
-            return 50  # Default middle score
+            print("    Warning: could not parse score from LLM reply, defaulting to 50")
+            return 50
 
         except Exception as e:
             print(f"    Warning: LLM scoring failed: {e}")
